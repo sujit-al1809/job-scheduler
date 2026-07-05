@@ -83,3 +83,7 @@ class JobBatchResponse(BaseModel):
     total: int
     created: int
     replayed: int
+
+
+class BulkRetryResponse(BaseModel):
+    requeued: int

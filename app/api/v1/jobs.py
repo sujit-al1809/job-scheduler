@@ -11,6 +11,7 @@ from app.core.db import get_session
 from app.models.enums import JobStatus
 from app.schemas.common import Page
 from app.schemas.job import (
+    BulkRetryResponse,
     JobBatchCreate,
     JobBatchItem,
     JobBatchResponse,
@@ -67,6 +68,20 @@ async def create_jobs_batch(
         created=created_count,
         replayed=len(items) - created_count,
     )
+
+
+@router.post(
+    "/queues/{queue_id}/jobs/retry-failed",
+    response_model=BulkRetryResponse,
+    summary="Bulk re-enqueue a queue's failed/dead jobs (fresh, attempts reset)",
+)
+async def retry_failed(
+    queue_id: int,
+    org_id: int = Depends(get_current_org_id),
+    session: AsyncSession = Depends(get_session),
+) -> BulkRetryResponse:
+    count = await job_service.retry_failed_jobs(session, org_id, queue_id)
+    return BulkRetryResponse(requeued=count)
 
 
 @router.get("/jobs", response_model=Page[JobResponse])

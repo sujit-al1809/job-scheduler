@@ -3,7 +3,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.api.v1 import auth, dlq, jobs, projects, queues, schedules, workers
+from app.api.v1 import (
+    auth,
+    dlq,
+    jobs,
+    metrics,
+    projects,
+    queues,
+    schedules,
+    workers,
+)
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(auth.router)
@@ -13,3 +22,4 @@ api_router.include_router(schedules.router)
 api_router.include_router(jobs.router)
 api_router.include_router(workers.router)
 api_router.include_router(dlq.router)
+api_router.include_router(metrics.router)

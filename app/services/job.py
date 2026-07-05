@@ -199,3 +199,46 @@ async def cancel_job(session: AsyncSession, org_id: int, job_id: int) -> Job:
         session, job, JobStatus.cancelled, message="cancelled_by_user"
     )
     return job
+
+
+async def retry_failed_jobs(
+    session: AsyncSession, org_id: int, queue_id: int
+) -> int:
+    """Bulk re-enqueue a queue's failed/dead jobs, fresh (attempts reset). Returns count.
+
+    Also clears any dead-letter entries for the re-enqueued jobs.
+    """
+    from app.models import DeadLetterJob  # local import avoids a cycle
+
+    queue = await get_queue_for_org(session, org_id, queue_id)
+    now = dt.datetime.now(tz=_UTC)
+
+    jobs = (
+        await session.scalars(
+            select(Job).where(
+                Job.queue_id == queue.id,
+                Job.status.in_([JobStatus.failed, JobStatus.dead]),
+            )
+        )
+    ).all()
+
+    requeued_ids: list[int] = []
+    for job in jobs:
+        job.attempts = 0
+        job.last_error = None
+        await job_state.transition(
+            session, job, JobStatus.queued, run_at=now, message="bulk_retry_failed"
+        )
+        requeued_ids.append(job.id)
+
+    if requeued_ids:
+        dlq_entries = (
+            await session.scalars(
+                select(DeadLetterJob).where(DeadLetterJob.job_id.in_(requeued_ids))
+            )
+        ).all()
+        for entry in dlq_entries:
+            await session.delete(entry)
+        await session.flush()
+
+    return len(requeued_ids)
