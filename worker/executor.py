@@ -14,11 +14,12 @@ import asyncio
 import datetime as dt
 import logging
 
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import Job, JobExecution, JobLog
 from app.models.enums import ExecutionStatus, JobStatus
-from app.services import job_state
+from app.services import job_state, retry
 from worker.handlers import JobContext, get_handler
 
 logger = logging.getLogger("worker.executor")
@@ -52,10 +53,18 @@ async def execute_job(
         if job is None or job.status is not JobStatus.claimed:
             return None
 
-        job.attempts += 1
+        job.attempts += 1  # retry-budget counter (reset on DLQ retry)
+        # The execution attempt number is monotonic across *all* executions of this
+        # job so history survives a DLQ "fresh" retry (which resets job.attempts).
+        # It also satisfies the unique (job_id, attempt) constraint.
+        prior = await session.scalar(
+            select(func.count())
+            .select_from(JobExecution)
+            .where(JobExecution.job_id == job.id)
+        )
         execution = JobExecution(
             job_id=job.id,
-            attempt=job.attempts,
+            attempt=int(prior or 0) + 1,
             worker_id=worker_id,
             status=ExecutionStatus.running,
             started_at=_utcnow(),
@@ -119,14 +128,10 @@ async def execute_job(
             )
         else:
             execution.error = error_text
-            job.last_error = error_text
-            await job_state.transition(
-                session,
-                job,
-                JobStatus.failed,
-                execution_id=execution.id,
-                level="error",
-                message=f"execution_failed: {error_text}",
+            # Records the failure and either schedules a retry (queued + backoff)
+            # or dead-letters the job once attempts are exhausted.
+            await retry.handle_job_failure(
+                session, job, execution_id=execution.id, error_text=error_text
             )
 
         await session.commit()

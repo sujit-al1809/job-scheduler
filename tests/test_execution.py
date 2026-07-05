@@ -89,11 +89,15 @@ async def test_successful_execution_records_everything(
 async def test_failing_handler_marks_failed_with_error(
     db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    job_id = await _seed_one(db_session, "demo.always_fail", {"message": "boom"})
+    # max_attempts=1 so the single failure is terminal (dead), keeping this test
+    # focused on how the *execution* records a failure (retry is covered separately).
+    job_id = await _seed_one(
+        db_session, "demo.always_fail", {"message": "boom"}, max_attempts=1
+    )
     await _claim_and_execute(db_session, session_factory, job_id)
 
     job = await db_session.get(Job, job_id)
-    assert job.status == JobStatus.failed
+    assert job.status == JobStatus.dead
     assert job.last_error == "boom"
 
     execution = await db_session.scalar(
@@ -106,14 +110,14 @@ async def test_failing_handler_marks_failed_with_error(
 async def test_timeout_marks_execution_timeout(
     db_session: AsyncSession, session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    # Sleep 5s but allow only 0.1s.
+    # Sleep 5s but allow only 0.1s. max_attempts=1 => terminal after the timeout.
     job_id = await _seed_one(
-        db_session, "demo.sleep", {"seconds": 5, "timeout_s": 0.1}
+        db_session, "demo.sleep", {"seconds": 5, "timeout_s": 0.1}, max_attempts=1
     )
     await _claim_and_execute(db_session, session_factory, job_id)
 
     job = await db_session.get(Job, job_id)
-    assert job.status == JobStatus.failed
+    assert job.status == JobStatus.dead
 
     execution = await db_session.scalar(
         select(JobExecution).where(JobExecution.job_id == job_id)
