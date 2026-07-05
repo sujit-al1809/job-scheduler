@@ -10,7 +10,14 @@ from app.api.deps import get_current_org_id
 from app.core.db import get_session
 from app.models.enums import JobStatus
 from app.schemas.common import Page
-from app.schemas.job import JobCreate, JobDetailResponse, JobResponse
+from app.schemas.job import (
+    JobBatchCreate,
+    JobBatchItem,
+    JobBatchResponse,
+    JobCreate,
+    JobDetailResponse,
+    JobResponse,
+)
 from app.services import job as job_service
 
 router = APIRouter(tags=["jobs"])
@@ -34,6 +41,32 @@ async def create_job(
         status.HTTP_201_CREATED if created else status.HTTP_200_OK
     )
     return JobResponse.model_validate(job)
+
+
+@router.post(
+    "/queues/{queue_id}/jobs/batch",
+    response_model=JobBatchResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Submit an array of jobs atomically (single transaction)",
+)
+async def create_jobs_batch(
+    queue_id: int,
+    body: JobBatchCreate,
+    org_id: int = Depends(get_current_org_id),
+    session: AsyncSession = Depends(get_session),
+) -> JobBatchResponse:
+    results = await job_service.batch_create_jobs(session, org_id, queue_id, body.jobs)
+    items = [
+        JobBatchItem(created=created, job=JobResponse.model_validate(job))
+        for job, created in results
+    ]
+    created_count = sum(1 for _, c in results if c)
+    return JobBatchResponse(
+        items=items,
+        total=len(items),
+        created=created_count,
+        replayed=len(items) - created_count,
+    )
 
 
 @router.get("/jobs", response_model=Page[JobResponse])

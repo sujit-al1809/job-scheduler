@@ -10,7 +10,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.errors import NotFoundError
+from app.core.errors import BadRequestError, NotFoundError
 from app.models import Job, JobLog, Project, Queue, RetryPolicy
 from app.models.enums import JobStatus
 from app.schemas.job import JobCreate
@@ -91,6 +91,35 @@ async def create_job(
     )
     await session.flush()
     return job, True
+
+
+async def batch_create_jobs(
+    session: AsyncSession, org_id: int, queue_id: int, items: list[JobCreate]
+) -> list[tuple[Job, bool]]:
+    """Submit many jobs in one transaction (all-or-nothing).
+
+    If any item is rejected the whole batch fails and nothing is persisted (the
+    request's session is rolled back by the dependency). Duplicate idempotency
+    keys *within* the same batch are rejected up front.
+    """
+    # Validate the queue once; individual creates re-validate cheaply.
+    await get_queue_for_org(session, org_id, queue_id)
+
+    seen_keys: set[str] = set()
+    for item in items:
+        if item.idempotency_key is not None:
+            if item.idempotency_key in seen_keys:
+                raise BadRequestError(
+                    "Duplicate idempotency_key within batch.",
+                    code="DUPLICATE_IN_BATCH",
+                    details={"idempotency_key": item.idempotency_key},
+                )
+            seen_keys.add(item.idempotency_key)
+
+    results: list[tuple[Job, bool]] = []
+    for item in items:
+        results.append(await create_job(session, org_id, queue_id, item))
+    return results
 
 
 def _org_jobs_query(org_id: int):

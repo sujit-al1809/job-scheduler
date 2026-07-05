@@ -67,3 +67,19 @@ class JobLogResponse(BaseModel):
 class JobDetailResponse(JobResponse):
     executions: list[JobExecutionResponse]
     logs: list[JobLogResponse]
+
+
+class JobBatchCreate(BaseModel):
+    jobs: list[JobCreate] = Field(min_length=1, max_length=1000)
+
+
+class JobBatchItem(BaseModel):
+    created: bool  # False => idempotent replay of an existing job
+    job: JobResponse
+
+
+class JobBatchResponse(BaseModel):
+    items: list[JobBatchItem]
+    total: int
+    created: int
+    replayed: int
