@@ -13,10 +13,14 @@ import os
 import socket
 import uuid
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.models.enums import WorkerStatus
 from app.services import worker as worker_service
+from worker.claim import claim_jobs
+from worker.executor import execute_job
 
 logger = logging.getLogger("worker")
 
@@ -33,6 +37,8 @@ class WorkerRuntime:
         concurrency: int | None = None,
         poll_interval_s: float | None = None,
         heartbeat_interval_s: float | None = None,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
+        project_ids: list[int] | None = None,
     ) -> None:
         self.name = name or default_worker_name()
         self.concurrency = concurrency or settings.worker_concurrency
@@ -40,9 +46,12 @@ class WorkerRuntime:
         self.heartbeat_interval_s = (
             heartbeat_interval_s or settings.heartbeat_interval_s
         )
+        self.project_ids = project_ids
+        self._session_factory = session_factory or SessionLocal
         self.worker_id: int | None = None
         self._stop = asyncio.Event()
         self._in_flight = 0
+        self._tasks: set[asyncio.Task] = set()
 
     @property
     def in_flight(self) -> int:
@@ -52,7 +61,7 @@ class WorkerRuntime:
         self._stop.set()
 
     async def _register(self) -> None:
-        async with SessionLocal() as session:
+        async with self._session_factory() as session:
             worker = await worker_service.register_worker(
                 session, self.name, self.concurrency
             )
@@ -66,7 +75,7 @@ class WorkerRuntime:
         assert self.worker_id is not None
         while not self._stop.is_set():
             try:
-                async with SessionLocal() as session:
+                async with self._session_factory() as session:
                     await worker_service.record_heartbeat(
                         session, self.worker_id, self._in_flight
                     )
@@ -79,11 +88,44 @@ class WorkerRuntime:
             except asyncio.TimeoutError:
                 pass
 
+    async def _execute_and_track(self, job_id: int) -> None:
+        assert self.worker_id is not None
+        try:
+            await execute_job(self._session_factory, self.worker_id, job_id)
+        except Exception:
+            logger.exception("execute_job_failed", extra={"extra_fields": {"job_id": job_id}})
+        finally:
+            self._in_flight -= 1
+
     async def _claim_loop(self) -> None:
-        # Extension point (commit 9): claim a batch, dispatch to the executor,
-        # respecting free slots (concurrency - in_flight). For now the loop simply
-        # idles until stop so heartbeats can be exercised.
+        assert self.worker_id is not None
         while not self._stop.is_set():
+            free_slots = self.concurrency - self._in_flight
+            batch = min(free_slots, settings.worker_claim_batch_size)
+            claimed: list[int] = []
+            if batch > 0:
+                try:
+                    async with self._session_factory() as session:
+                        claimed = await claim_jobs(
+                            session,
+                            self.worker_id,
+                            batch_size=batch,
+                            project_ids=self.project_ids,
+                        )
+                        await session.commit()
+                except Exception:
+                    logger.exception("claim_failed")
+
+            for job_id in claimed:
+                self._in_flight += 1
+                task = asyncio.create_task(self._execute_and_track(job_id))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+
+            # If we filled a full batch there may be more ready work; poll again
+            # immediately. Otherwise wait for the poll interval (or an early stop).
+            if claimed and len(claimed) == batch:
+                continue
             try:
                 await asyncio.wait_for(
                     self._stop.wait(), timeout=self.poll_interval_s
