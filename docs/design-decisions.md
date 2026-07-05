@@ -120,3 +120,75 @@ documented `docker compose` / `alembic` / `uvicorn` workflow.
 - **Structured JSON logging** with a request-id middleware: every request gets an
   id (honoring an inbound `X-Request-ID`), echoed on the response and attached to
   every log line via a `contextvar`.
+
+## Concurrency & reliability
+
+### `SELECT ... FOR UPDATE SKIP LOCKED` vs advisory locks
+
+Claiming uses row-level `FOR UPDATE SKIP LOCKED` on the `jobs` rows themselves.
+The alternative — a Postgres **advisory lock** per job id — would also work, but:
+
+- `SKIP LOCKED` locks exactly the rows the claim query selects, in the same
+  statement that flips their status. There's no second round-trip and no separate
+  lock namespace to reconcile with row state.
+- Advisory locks are session-scoped and easy to leak (a crashed worker holding an
+  advisory lock needs explicit cleanup); row locks are released automatically when
+  the claim transaction ends.
+- `SKIP LOCKED` composes naturally with `ORDER BY ... LIMIT`, giving priority-ordered
+  batch claiming for free off the partial index.
+
+So the row-lock approach is both simpler and more correct here. The claim
+transaction is deliberately tiny (claim → commit) so locks are held for microseconds.
+
+### Per-queue concurrency is a *soft* limit
+
+At claim time a queue is excluded when
+`count(jobs WHERE queue_id = q.id AND status IN ('claimed','running')) >= concurrency_limit`.
+Under `READ COMMITTED`, two workers can both read a count just under the limit and
+both claim, briefly overshooting. We **accept** this race rather than serialize
+claims behind a heavier lock, because:
+
+- Enforcing a hard cap would require locking the queue (or an advisory lock per
+  queue), which reintroduces the contention `SKIP LOCKED` was chosen to avoid.
+- The overshoot is bounded and transient — the next claim cycle sees the true count
+  and backs off. For a throughput limiter, "approximately N in flight" is the
+  standard, honest trade-off.
+
+This is documented behavior, not a bug: the limit is a throttle, not a hard barrier.
+
+### At-least-once semantics + idempotency
+
+A worker can die after executing a job but before committing its `completed`
+transition; the reaper will then requeue it, and it runs again. So execution is
+**at-least-once**, never at-most-once. Two mechanisms make the observable result
+effectively-once:
+
+- **Client idempotency keys** — an optional `idempotency_key` with a partial unique
+  index `(project_id, idempotency_key) WHERE idempotency_key IS NOT NULL`. Duplicate
+  submits return the existing job (200, not 201). A parallel-submit race is resolved
+  by the unique index: the losing insert gets an `IntegrityError`, rolls back, and
+  returns the winner's job (tested under 10-way concurrency).
+- **Idempotent handlers** — handlers receive `(job_id, execution_id, payload)` and
+  are expected to be safe to re-run. The demo handlers are.
+
+Attempt accounting keeps these honest: the **execution attempt number** is monotonic
+(count of prior executions + 1), decoupled from `jobs.attempts` (the retry budget,
+which resets on a DLQ "fresh" retry). This keeps the `(job_id, attempt)` unique
+constraint intact even after a reset, and preserves full execution history.
+
+### Retries are scheduled, not slept
+
+A failed job is set back to `queued` with `run_at = now + backoff`; the worker never
+`sleep()`s while holding a job. This keeps worker slots free for other work and makes
+backoff survive worker restarts (the delay lives in the row, not in memory).
+
+### Polling vs `LISTEN/NOTIFY` (future work)
+
+Workers and the scheduler **poll** on a short interval. This is simple, robust, and
+has no missed-wakeup edge cases, at the cost of a small claim latency (≤ poll
+interval) and steady baseline query load. A natural evolution is Postgres
+`LISTEN/NOTIFY`: the API/scheduler `NOTIFY` a channel on enqueue, and idle workers
+`LISTEN` to claim immediately, falling back to polling as a safety net. It would cut
+latency and idle load but adds connection management and a fallback path — deferred
+as it isn't needed to meet the reliability goals.
+
