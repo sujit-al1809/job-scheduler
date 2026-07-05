@@ -32,6 +32,11 @@ web/node_modules/
 npm-debug.log*
 yarn-error.log*
 
+# TS build artifacts (composite project emits these from vite.config.ts)
+*.tsbuildinfo
+web/vite.config.js
+web/vite.config.d.ts
+
 # Alembic local
 *.sqlite3
 
