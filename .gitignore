@@ -1,0 +1,46 @@
+# Project planning docs (local only, not committed)
+CLAUDE.md
+COMMIT_PLAN.md
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env.local
+
+# Node
+node_modules/
+web/dist/
+web/node_modules/
+npm-debug.log*
+yarn-error.log*
+
+# Alembic local
+*.sqlite3
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Docker volumes (local)
+pgdata/
