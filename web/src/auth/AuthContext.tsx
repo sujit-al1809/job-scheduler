@@ -4,6 +4,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { api, getToken, setToken } from "../api/client";
 import type { User } from "../api/types";
 
@@ -27,6 +28,7 @@ interface RegisterResponse {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [token, setTok] = useState<string | null>(getToken());
   const [user, setUser] = useState<User | null>(null);
 
@@ -54,6 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setToken(null);
     setTok(null);
     setUser(null);
+    queryClient.clear(); // drop cached data so nothing leaks across accounts
   }
 
   async function loadMe() {

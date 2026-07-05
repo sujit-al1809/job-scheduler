@@ -30,7 +30,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const projects = data?.items ?? [];
 
   useEffect(() => {
-    if (selectedId === null && projects.length > 0) {
+    // Pick a default, and self-correct if the current selection is not in the
+    // loaded projects (e.g. after switching accounts / deleting a project).
+    if (projects.length > 0 && !projects.some((p) => p.id === selectedId)) {
       setSelectedId(projects[0].id);
     }
   }, [projects, selectedId]);
