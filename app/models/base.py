@@ -7,6 +7,10 @@ from sqlalchemy import BigInteger, DateTime, Identity, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 
+def _utcnow() -> dt.datetime:
+    return dt.datetime.now(tz=dt.timezone.utc)
+
+
 class PKMixin:
     """Bigint identity primary key.
 
@@ -25,9 +29,11 @@ class TimestampMixin:
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Python-side onupdate (not a SQL expression): the value is known after flush,
+    # so the attribute never expires and can be serialized without a lazy async load.
     updated_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        onupdate=func.now(),
+        onupdate=_utcnow,
         nullable=False,
     )

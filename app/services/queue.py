@@ -11,10 +11,28 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
-from app.models import Job, JobExecution, Queue, RetryPolicy
+from app.models import Job, JobExecution, Project, Queue, RetryPolicy
 from app.models.enums import ExecutionStatus, JobStatus
 from app.schemas.queue import QueueCreate, QueueUpdate, RetryPolicyIn
 from app.services.project import get_project_or_404
+
+
+async def get_queue_for_org(
+    session: AsyncSession, org_id: int, queue_id: int
+) -> Queue:
+    """Fetch a queue by its global id, enforcing that it belongs to the caller's org.
+
+    Jobs reference queues by top-level id (``/queues/{id}/jobs``), so this resolves
+    the queue through its project's org without a project id in the path.
+    """
+    queue = await session.scalar(
+        select(Queue)
+        .join(Project, Project.id == Queue.project_id)
+        .where(Queue.id == queue_id, Project.org_id == org_id)
+    )
+    if queue is None:
+        raise NotFoundError("Queue not found.", code="QUEUE_NOT_FOUND")
+    return queue
 
 
 async def _resolve_retry_policy_id(
