@@ -100,3 +100,23 @@ On the build machine:
 
 These are local-machine details and do not affect the application code or the
 documented `docker compose` / `alembic` / `uvicorn` workflow.
+
+- **`bcrypt` pinned to `4.0.1`.** `passlib` 1.7.4 (latest) probes the bcrypt
+  backend at startup with a >72-byte test hash; bcrypt ≥4.1 raises `ValueError`
+  on that probe, breaking password hashing entirely. `4.0.1` is the last release
+  passlib detects cleanly. We keep the `passlib[bcrypt]` stack the assignment
+  specifies rather than swapping the hashing library.
+
+## Auth & error handling
+
+- **JWT access tokens**, `sub = user.id` (string, as JWT requires). Registration
+  bootstraps a user + a personal organization + an owner `org_members` row in one
+  unit of work, so a user always has an org to own projects under.
+- **Uniform error envelope** — `{"error": {"code", "message", "details"}}` — is
+  produced by exception handlers for our `AppError` hierarchy, pydantic validation
+  errors (`VALIDATION_ERROR`), raw `HTTPException`s, and any unhandled exception
+  (`INTERNAL_ERROR`, logged with a traceback). Auth failures deliberately use
+  generic codes (`INVALID_CREDENTIALS`) so they don't leak whether an email exists.
+- **Structured JSON logging** with a request-id middleware: every request gets an
+  id (honoring an inbound `X-Request-ID`), echoed on the response and attached to
+  every log line via a `contextvar`.
