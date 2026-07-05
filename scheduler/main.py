@@ -18,6 +18,7 @@ import signal
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.core.logging import setup_logging
+from app.services.recovery import reap_dead_workers
 from app.services.scheduler_engine import (
     materialize_due_cron_jobs,
     promote_due_scheduled_jobs,
@@ -31,13 +32,19 @@ async def _tick() -> None:
         promoted = await promote_due_scheduled_jobs(session)
     async with SessionLocal() as session:
         materialized = await materialize_due_cron_jobs(session)
-    if promoted or materialized:
+    async with SessionLocal() as session:
+        reaped = await reap_dead_workers(
+            session, timeout_s=settings.heartbeat_timeout_s
+        )
+    if promoted or materialized or reaped["requeued_jobs"] or reaped["dead_workers"]:
         logger.info(
             "scheduler_tick",
             extra={
                 "extra_fields": {
                     "promoted": promoted,
                     "materialized": len(materialized),
+                    "dead_workers": reaped["dead_workers"],
+                    "requeued_jobs": reaped["requeued_jobs"],
                 }
             },
         )

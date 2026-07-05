@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.core.db import SessionLocal
 from app.models.enums import WorkerStatus
 from app.services import worker as worker_service
+from app.services.recovery import release_worker_jobs
 from worker.claim import claim_jobs
 from worker.executor import execute_job
 
@@ -133,14 +134,48 @@ class WorkerRuntime:
             except asyncio.TimeoutError:
                 pass
 
-    async def _shutdown(self) -> None:
+    async def _drain_and_release(self) -> None:
+        """Stop, wait for in-flight tasks up to the drain timeout, release the rest,
+        and mark the worker stopped."""
         if self.worker_id is None:
             return
-        async with SessionLocal() as session:
+
+        async with self._session_factory() as session:
+            await worker_service.set_worker_status(
+                session, self.worker_id, WorkerStatus.draining
+            )
+
+        if self._tasks:
+            logger.info(
+                "worker_draining",
+                extra={
+                    "extra_fields": {
+                        "worker_id": self.worker_id,
+                        "in_flight": len(self._tasks),
+                        "drain_timeout_s": settings.drain_timeout_s,
+                    }
+                },
+            )
+            _, pending = await asyncio.wait(
+                self._tasks, timeout=settings.drain_timeout_s
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        # Release anything still claimed/running by us back to queued.
+        async with self._session_factory() as session:
+            released = await release_worker_jobs(session, self.worker_id)
+
+        async with self._session_factory() as session:
             await worker_service.set_worker_status(
                 session, self.worker_id, WorkerStatus.stopped, stopped=True
             )
-        logger.info("worker_stopped", extra={"extra_fields": {"worker_id": self.worker_id}})
+        logger.info(
+            "worker_stopped",
+            extra={"extra_fields": {"worker_id": self.worker_id, "released": released}},
+        )
 
     async def run(self) -> None:
         await self._register()
@@ -156,5 +191,8 @@ class WorkerRuntime:
         )
         try:
             await asyncio.gather(self._heartbeat_loop(), self._claim_loop())
+        except asyncio.CancelledError:
+            self._stop.set()
+            raise
         finally:
-            await self._shutdown()
+            await self._drain_and_release()
